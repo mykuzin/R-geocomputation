@@ -1,0 +1,234 @@
+---
+title: "geoR-ch4"
+format: html
+editor: visual
+---
+
+# **4 Spatial data operations**
+
+```{r output = FALSE}
+library(sf)
+library(terra)
+library(dplyr)
+library(spData)
+library(tmap)
+library(tidyverse)
+```
+
+This chapter shows how spatial objects can be modified in a multitude of ways based on their location and shape. 
+
+Spatial operations differ from non-spatial operations in a number of ways, however: spatial joins, for example, can be done in a number of ways — including matching entities that intersect with or are within a certain distance of the target dataset — while the attribution joins can only be done in one way (except when using fuzzy joins).
+
+## **4.2 Spatial operations on vector data**
+
+### **4.2.1 Spatial subsetting**
+
+Spatial subsetting is the process of taking a spatial object and returning a new object containing only features that *relate* in space to another object. Analogous to *attribute subsetting*, subsets of `sf` data frames can be created with square bracket (`[`) operator using the syntax `x[y, , op = st_intersects]`, where `x` is an `sf` object from which a subset of rows will be returned, `y` is the ‘subsetting object’ and `, op = st_intersects` is an optional argument that specifies the topological relation (also known as the binary predicate) used to do the subsetting.
+
+The default topological relation used when an `op` argument is not provided is [`st_intersects()`](https://r-spatial.github.io/sf/reference/geos_binary_pred.html): the command `x[y, ]` is identical to `x[y, , op = st_intersects]` shown above but not `x[y, , op = st_disjoint]`
+
+The [`filter()`](https://dplyr.tidyverse.org/reference/filter.html) function from the **tidyverse** can also be used, but this approach is more verbose, as we will see in the examples below.
+
+To demonstrate spatial subsetting, we will use the `nz` and `nz_height` datasets in the **spData** package, which contain geographic data on the 16 main regions and 101 highest points in New Zealand, respectively, in a projected coordinate reference system. 
+
+```{r}
+class(nz)
+
+canterbury <- nz |> filter(Name == "Canterbury")
+
+canterbury_height <- nz_height[canterbury, ]
+
+plot(nz$geom, reset = FALSE)
+plot(canterbury_height[, "elevation"], add = TRUE)
+```
+
+```{r}
+p_hpnz1 = tm_shape(nz) + 
+  tm_polygons(fill = "white") +
+  tm_shape(nz_height) + 
+  tm_symbols(shape = 2, col = "red", size = 0.5, col_alpha = 0.75) +
+  tm_title("High points in New Zealand") +
+  tm_layout(bg.color = "lightblue")
+p_hpnz2 = tm_shape(nz) + 
+  tm_polygons(fill = "white") +
+  tm_shape(canterbury) +
+  tm_fill(col = "gray") + 
+  tm_shape(canterbury_height) + 
+  tm_symbols(shape = 2, col = "red", size = 0.5, col_alpha = 0.75) +
+  tm_title("High points in Canterbury") +
+  tm_layout(bg.color = "lightblue")
+tmap_arrange(p_hpnz1, p_hpnz2, ncol = 2)
+```
+
+Objects used for spatial subsetting in this way must have the class `sf` or `sfc`: both `nz` and `nz_height` are geographic vector data frames and have the class `sf`, and the result of the operation returns another `sf` object representing the features in the target `nz_height` object that intersect with (in this case high points that are located within) the `canterbury` region.
+
+**Another way of doing spatial subsetting uses objects returned by topological operators**. These objects can be useful in their own right, for example when exploring the graph network of relationships between contiguous regions, but they can also be used for subsetting, as demonstrated in the code chunk below.
+
+```{r}
+sel_sgbp <- st_intersects(x = nz_height, y = canterbury)
+
+class(sel_sgbp)
+
+sel_sgbp # sgbp object
+
+sel_logical <- lengths(sel_sgbp) > 0 # which is then converted to logical vector
+canterbury_height2 <- nz_height[sel_logical, ]
+```
+
+The above code chunk creates an object of class `sgbp` (a sparse geometry binary predicate, a list of length `x` in the spatial operation) and then converts it into a logical vector `sel_logical` (containing only `TRUE` and `FALSE` values, something that can also be used by **dplyr**’s filter function). The function [`lengths()`](https://rdrr.io/r/base/lengths.html) identifies which features in `nz_height` intersect with *any* objects in `y`.
+
+The same result can be also achieved with the **sf** function [`st_filter()`](https://r-spatial.github.io/sf/reference/st_join.html) which was [created](https://github.com/r-spatial/sf/issues/1148) to increase compatibility between `sf` objects and **dplyr** data manipulation code:
+
+```{r}
+canterbury_height3 <- nz_height |>
+  st_filter(y = canterbury, .predicate = st_intersects)
+```
+
+The next section explores different types of spatial relation, also known as binary predicates, that can be used to identify whether or not two features are spatially related or not.
+
+### **4.2.2 Topological relations**
+
+Topological relations describe the spatial relationships between objects. “Binary topological relationships”, to give them their full name, are logical statements (in that the answer can only be `TRUE` or `FALSE`) about the spatial relationships between two objects defined by ordered sets of points (typically forming points, lines and polygons) in two or more dimensions.
+
+![Topological relations between vector geometries](images/relations-1.png)
+
+While the relations *equals*, *intersects*, *crosses*, *touches* and *overlaps* are symmetrical, meaning that if `function(x, y)` is true, `function(y, x)` will also be true, relations in which the order of the geometries are important such as *contains* and *within* are not. 
+
+To see how topological relations work in practice, let’s create a simple reproducible example
+
+```{r}
+polygon_matrix = cbind(
+  x = c(0, 0, 1, 1,   0),
+  y = c(0, 1, 1, 0.5, 0)
+) # начинается с нулей, нулями заканчивается
+
+class(polygon_matrix)
+
+polygon_sfc = polygon_matrix |> list() |> st_polygon() |> st_sfc()
+
+class(polygon_sfc)
+```
+
+We will create additional geometries to demonstrate spatial relations with the following commands which, when plotted on top of the polygon created above, relate in space to one another.
+
+Note the use of the function [`st_as_sf()`](https://r-spatial.github.io/sf/reference/st_as_sf.html) and the argument `coords` to efficiently convert from a data frame containing columns representing coordinates to an `sf` object containing points:
+
+```{r}
+point_df = data.frame(
+  x = c(0.2, 0.7, 0.4),
+  y = c(0.1, 0.2, 0.8)
+)
+
+point_sf <- st_as_sf(point_df, coords = c("x", "y"))
+```
+
+A simple query is: which of the points in `point_sf` intersect in some way with polygon `polygon_sfc`? This question can be answered with the spatial predicate [`st_intersects()`](https://r-spatial.github.io/sf/reference/geos_binary_pred.html) as follows:
+
+```{r}
+plot(polygon_sfc, border = 'blue', col = 'yellow', axes = TRUE)
+plot(point_sf, col = 'black', add = TRUE, pch = 16, cex = 1.5)
+```
+
+```{r}
+st_intersects(point_sf, polygon_sfc)
+```
+
+The result should match your intuition: positive (`1`) results are returned for the first and third point, and a negative result (represented by an empty vector) for the second are outside the polygon’s border. What may be unexpected is that the result comes in the form of a list of vectors. **This *sparse matrix* output only registers a relation if one exists, reducing the memory requirements of topological operations on multi-feature objects.** As we saw in the previous section, a *dense matrix* consisting of `TRUE` or `FALSE` values is returned when `sparse = FALSE`.
+
+```{r}
+polyg_point_inters <- st_intersects(point_sf, polygon_sfc, sparse = FALSE)
+```
+
+In the above output each row represents a feature in the target (argument `x`) object, and each column represents a feature in the selecting object (`y`). In this case, there is only one feature in the `y` object `polygon_sfc` so the result, which can be used for subsetting, has only one column.
+
+```{r}
+par(pty = "s")
+plot(polygon_sfc, border = "red", col = "gray", axes = TRUE)
+plot(point_sf, add = TRUE, lab = 1:4, cex = 2)
+text(point_df[, 1] + 0.02, point_df[, 2] + 0.04, 1:3, cex = 1.1)
+```
+
+```{r}
+polygon_sfc[polyg_point_inters]
+```
+
+[`st_intersects()`](https://r-spatial.github.io/sf/reference/geos_binary_pred.html) returns `TRUE` even in cases where the features just touch: *intersects* is a ‘catch-all’ topological operation which identifies many types of spatial relation.
+
+More restrictive questions include which points lie within the polygon, and which features are on or contain a shared boundary with `y`? These can be answered as follows:
+
+```{r}
+st_within(point_sf, polygon_sfc, sparse = FALSE)
+st_touches(point_sf, polygon_sfc, sparse = FALSE)
+```
+
+The opposite of [`st_intersects()`](https://r-spatial.github.io/sf/reference/geos_binary_pred.html) is [`st_disjoint()`](https://r-spatial.github.io/sf/reference/geos_binary_pred.html), which returns only objects that do not spatially relate in any way to the selecting object (note `[, 1]` converts the result into a vector).
+
+```{r}
+st_disjoint(point_sf, polygon_sfc, sparse = FALSE)[, 1] # [, 1] converts to vector
+```
+
+The function [`st_is_within_distance()`](https://r-spatial.github.io/sf/reference/geos_binary_pred.html) detects features that *almost touch* the selection object, which has an additional `dist` argument. It can be used to set how close target objects need to be before they are selected. 
+
+```{r}
+st_is_within_distance(point_sf, polygon_sfc, dist = .2, sparse = FALSE)[, 1]
+```
+
+Note that although point 2 is more than 0.2 units of distance from the nearest vertex of `polygon_sfc`, it is still selected when the distance is set to 0.2. This is because distance is measured to the nearest edge, in this case the part of the polygon that lies directly above point 2 
+
+You can verify the actual distance between point 2 and the polygon is 0.13 with the command:
+
+```{r}
+st_distance(point_sf$geometry[2], polygon_sfc)[, 1]
+```
+
+Functions for calculating topological relations use spatial indices to largely speed up spatial query performance. They achieve that using **the Sort-Tile-Recursive R-tree (STR) algorithm**. The R-tree is built on the first argument (`x`), and used to match all geometries over the second argument (`y`) of binary functions.
+
+### **4.2.3 Distance relations**
+
+While the topological relations presented in the previous section are binary (a feature either intersects with another or does not) distance relations are continuous. 
+
+```{r}
+nz_heighest <- nz_height |> slice_max(n = 1, order_by = elevation)
+
+nz_centroid <- st_centroid(nz[nz$Name == "Canterbury", ])
+
+st_distance(nz_centroid, nz_heighest)[, 1]
+
+```
+
+There are two potentially surprising things about the result:
+
+-   It has `units`, telling us the distance is 100,000 meters, not 100,000 inches, or any other measure of distance
+-   It is returned as a matrix, even though the result only contains a single value
+
+This second feature hints at another useful feature of [`st_distance()`](https://r-spatial.github.io/sf/reference/geos_measures.html), its ability to return *distance matrices* between all combinations of features in objects `x` and `y`. This is illustrated in the command below, which finds the distances between the first three features in `nz_height` and the Otago and Canterbury regions of New Zealand represented by the object `co`.
+
+```{r}
+nz |> 
+  filter(str_detect(Name, "Otag")) |>
+  st_distance(nz_height[1, ]) |>
+  pluck(1)
+
+?pluck
+
+# or
+co <- nz |> filter(str_detect(Name, regex("Canter|Otag")))
+st_distance(nz_height[1:3, ], co)
+```
+
+Note that the distance between the second and third features in `nz_height` and the second feature in `co` is zero. This demonstrates the fact that distances between points and polygons refer to the distance to *any part of the polygon*. The second and third points in `nz_height` are *in* Otago, which can be verified by plotting them 
+
+```{r}
+# plot(co$geom[2])
+#or with st_geometry
+
+plot(st_geometry(co)[2])
+plot(st_geometry(nz_height)[2:3], add = TRUE)
+
+```
+
+### **4.2.4 DE-9IM strings**
+
+As the cryptic name suggests, this is not an easy topic to understand, but it is worth knowing about because it underlies many spatial operations and enables the creation of custom spatial predicates. The model was originally labelled “DE + 9IM” by its inventors, referring to the “dimension of the intersections of boundaries, interiors, and exteriors of two features”.
+
+DE-9IM is applicable to two-dimensional objects (points, lines and polygons) in Euclidean space, meaning that the model (and software implementing it such as GEOS) assumes you are working with data in a projected coordinate reference system.
